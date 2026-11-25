@@ -181,7 +181,7 @@ func (s *server) appToken(user *User, app, shared string) string {
 func (s *server) registerAuthTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "set_token",
-		Description: "Store your personal token for an app (mealie, immich, or obsidian; fns is accepted as an alias for obsidian). For obsidian, mint a REST token in https://obsidian.calculon.tech WebGUI with scope p:rest c:* f:* or c:openwebui-tools. Call with an empty token to forget it.",
+		Description: "Store your personal token for an app (mealie, immich, or obsidian; fns is accepted as an alias for obsidian). For obsidian, mint a REST token in the Fast Note Sync WebGUI with scope p:rest c:* f:* or c:openwebui-tools. Call with an empty token to forget it.",
 	}, s.setToken)
 	mcp.AddTool(srv, &mcp.Tool{Name: "token_status", Description: "Show the logged-in user and which apps have tokens or auto-auth configured."}, s.tokenStatus)
 }
