@@ -48,7 +48,6 @@ func TestTokenStatusAndSetToken(t *testing.T) {
 		MealieToken:       "shared-mealie",
 		ImmichURL:         "http://immich.local",
 		FNSURL:            "http://fns.local",
-		FNSMintSecret:     "fns-secret",
 	})
 
 	ctx := ctxWithUser("u1", "alice@example.com", "Alice")
@@ -60,6 +59,24 @@ func TestTokenStatusAndSetToken(t *testing.T) {
 	}
 	if got := resultText(t, res); got != "stored" {
 		t.Fatalf("setToken = %q, want stored", got)
+	}
+
+	// Store personal obsidian token via "fns" alias
+	res, _, err = s.setToken(ctx, nil, tokenIn{App: "fns", Token: "alice-obsidian"})
+	if err != nil {
+		t.Fatalf("setToken (fns alias): %v", err)
+	}
+	if got := resultText(t, res); got != "stored" {
+		t.Fatalf("setToken (fns alias) = %q, want stored", got)
+	}
+
+	// Reject unknown app
+	res, _, err = s.setToken(ctx, nil, tokenIn{App: "other", Token: "x"})
+	if err != nil {
+		t.Fatalf("setToken (other): %v", err)
+	}
+	if got := resultText(t, res); got != "error: app must be mealie, immich, or obsidian" {
+		t.Fatalf("setToken (other) = %q", got)
 	}
 
 	// Check token_status
@@ -78,10 +95,10 @@ func TestTokenStatusAndSetToken(t *testing.T) {
 				Configured bool   `json:"configured"`
 				Auth       string `json:"auth"`
 			} `json:"seafile"`
-			FNS struct {
-				Configured bool   `json:"configured"`
-				Auth       string `json:"auth"`
-			} `json:"fns"`
+			Obsidian struct {
+				Configured    bool `json:"configured"`
+				PersonalToken bool `json:"personal_token"`
+			} `json:"obsidian"`
 			Mealie struct {
 				Configured     bool `json:"configured"`
 				PersonalToken  bool `json:"personal_token"`
@@ -103,14 +120,33 @@ func TestTokenStatusAndSetToken(t *testing.T) {
 	if !status.Apps.Seafile.Configured || status.Apps.Seafile.Auth != "auto" {
 		t.Fatalf("unexpected seafile status: %+v", status.Apps.Seafile)
 	}
-	if !status.Apps.FNS.Configured || status.Apps.FNS.Auth != "auto" {
-		t.Fatalf("unexpected fns status: %+v", status.Apps.FNS)
+	if !status.Apps.Obsidian.Configured || !status.Apps.Obsidian.PersonalToken {
+		t.Fatalf("unexpected obsidian status: %+v", status.Apps.Obsidian)
 	}
 	if !status.Apps.Mealie.Configured || status.Apps.Mealie.PersonalToken || !status.Apps.Mealie.SharedFallback {
 		t.Fatalf("unexpected mealie status: %+v", status.Apps.Mealie)
 	}
 	if !status.Apps.Immich.Configured || !status.Apps.Immich.PersonalToken || status.Apps.Immich.SharedFallback {
 		t.Fatalf("unexpected immich status: %+v", status.Apps.Immich)
+	}
+
+	// Forget obsidian token and verify token_status reflects it
+	res, _, err = s.setToken(ctx, nil, tokenIn{App: "obsidian", Token: ""})
+	if err != nil {
+		t.Fatalf("forget obsidian token: %v", err)
+	}
+	if got := resultText(t, res); got != "forgotten" {
+		t.Fatalf("forget obsidian token = %q, want forgotten", got)
+	}
+	res, _, err = s.tokenStatus(ctx, nil, Empty{})
+	if err != nil {
+		t.Fatalf("tokenStatus after forget: %v", err)
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &status); err != nil {
+		t.Fatalf("unmarshal tokenStatus after forget: %v", err)
+	}
+	if status.Apps.Obsidian.PersonalToken {
+		t.Fatalf("expected obsidian personal_token=false after forget, got %+v", status.Apps.Obsidian)
 	}
 }
 

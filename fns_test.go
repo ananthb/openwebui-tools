@@ -8,75 +8,64 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
-func TestFNSClientMintAnd401Refresh(t *testing.T) {
-	var mintCount atomic.Int32
-	var apiCount atomic.Int32
-
+func TestFNSClientUserTokenAnd401(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/internal/token":
-			if r.Header.Get("Authorization") != "Bearer fns-secret" {
-				http.Error(w, "bad mint secret", http.StatusUnauthorized)
-				return
-			}
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["email"] != "alice@example.com" || body["client"] != "openwebui-tools" ||
-				body["scope"] != "p:rest c:openwebui-tools f:*" || body["expiredDays"] != float64(7) {
-				http.Error(w, "unexpected mint body", http.StatusBadRequest)
-				return
-			}
-			n := mintCount.Add(1)
-			_ = json.NewEncoder(w).Encode(map[string]string{"token": "fns-tok-" + string(rune('0'+n))})
-		case "/api/vault":
-			if r.Header.Get("X-Client") != "openwebui-tools" {
-				http.Error(w, "missing X-Client", http.StatusBadRequest)
-				return
-			}
-			n := apiCount.Add(1)
-			if n == 1 {
-				http.Error(w, "token revoked", http.StatusUnauthorized)
-				return
-			}
-			if r.Header.Get("Authorization") != "Bearer fns-tok-2" {
-				http.Error(w, "expected refreshed token", http.StatusUnauthorized)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []string{"MainVault"}})
-		default:
+		if r.URL.Path != "/api/vault" {
 			http.NotFound(w, r)
+			return
 		}
+		if r.Header.Get("X-Client") != "openwebui-tools" {
+			http.Error(w, "missing X-Client", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer fns-tok-good" {
+			http.Error(w, "token revoked", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []string{"MainVault"}})
 	}))
 	defer srv.Close()
 
 	s := newServer(config{
-		StorePath:     filepath.Join(t.TempDir(), "tokens.json"),
-		FNSURL:        srv.URL,
-		FNSMintSecret: "fns-secret",
+		StorePath: filepath.Join(t.TempDir(), "tokens.json"),
+		FNSURL:    srv.URL,
 	})
 	ctx := ctxWithUser("u1", "alice@example.com", "Alice")
 
+	// Missing token should prompt set_token(app="obsidian", token=...)
 	res, _, err := s.fnsVaults(ctx, nil, Empty{})
 	if err != nil {
-		t.Fatalf("fnsVaults: %v", err)
+		t.Fatalf("fnsVaults without token: %v", err)
+	}
+	if msg := resultText(t, res); !strings.Contains(msg, `set_token(app="obsidian", token=...)`) {
+		t.Fatalf("expected set_token prompt, got: %s", msg)
+	}
+
+	// Revoked/expired token should return 401 message prompting re-setting token
+	if _, _, err := s.setToken(ctx, nil, tokenIn{App: "fns", Token: "fns-tok-old"}); err != nil {
+		t.Fatalf("setToken (fns alias): %v", err)
+	}
+	res, _, err = s.fnsVaults(ctx, nil, Empty{})
+	if err != nil {
+		t.Fatalf("fnsVaults 401: %v", err)
+	}
+	if msg := resultText(t, res); !strings.Contains(msg, "401") || !strings.Contains(msg, `set_token(app="obsidian", token=...)`) {
+		t.Fatalf("expected 401 re-set prompt, got: %s", msg)
+	}
+
+	// Valid token succeeds
+	if _, _, err := s.setToken(ctx, nil, tokenIn{App: "obsidian", Token: "fns-tok-good"}); err != nil {
+		t.Fatalf("setToken (obsidian): %v", err)
+	}
+	res, _, err = s.fnsVaults(ctx, nil, Empty{})
+	if err != nil {
+		t.Fatalf("fnsVaults valid: %v", err)
 	}
 	if !strings.Contains(resultText(t, res), "MainVault") {
 		t.Fatalf("unexpected fnsVaults result: %s", resultText(t, res))
-	}
-	if mintCount.Load() != 2 {
-		t.Fatalf("mintCount = %d, want 2", mintCount.Load())
-	}
-
-	// Subsequent call should reuse cached token without minting again
-	if _, _, err := s.fnsVaults(ctx, nil, Empty{}); err != nil {
-		t.Fatalf("second fnsVaults: %v", err)
-	}
-	if mintCount.Load() != 2 {
-		t.Fatalf("mintCount after cached call = %d, want 2", mintCount.Load())
 	}
 }
 
@@ -90,10 +79,6 @@ func TestFNSToolsFormatting(t *testing.T) {
 	var calls []call
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/internal/token" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"token": "tok-1"}})
-			return
-		}
 		if r.Header.Get("Authorization") != "Bearer tok-1" || r.Header.Get("X-Client") != "openwebui-tools" {
 			http.Error(w, "missing auth headers", http.StatusUnauthorized)
 			return
@@ -105,11 +90,13 @@ func TestFNSToolsFormatting(t *testing.T) {
 	defer srv.Close()
 
 	s := newServer(config{
-		StorePath:     filepath.Join(t.TempDir(), "tokens.json"),
-		FNSURL:        srv.URL,
-		FNSMintSecret: "sec",
+		StorePath: filepath.Join(t.TempDir(), "tokens.json"),
+		FNSURL:    srv.URL,
 	})
 	ctx := ctxWithUser("u1", "alice@example.com", "Alice")
+	if _, _, err := s.setToken(ctx, nil, tokenIn{App: "obsidian", Token: "tok-1"}); err != nil {
+		t.Fatalf("setToken: %v", err)
+	}
 
 	_, _, _ = s.fnsFolderTree(ctx, nil, fnsFolderTreeIn{Vault: "V", Depth: 2})
 	_, _, _ = s.fnsFolderCreate(ctx, nil, fnsFolderIn{Vault: "V", Path: "Projects"})

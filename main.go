@@ -27,7 +27,7 @@ type config struct {
 	SeafileAdminToken      string
 	MealieURL, MealieToken string
 	ImmichURL, ImmichKey   string
-	FNSURL, FNSMintSecret  string
+	FNSURL                 string
 }
 
 type server struct {
@@ -38,11 +38,12 @@ type server struct {
 }
 
 func newServer(cfg config) *server {
+	store := newTokenStore(cfg.StorePath)
 	return &server{
 		cfg:   cfg,
-		store: newTokenStore(cfg.StorePath),
+		store: store,
 		sf:    newSeafileClient(cfg.SeafileBase, cfg.SeafileAdminEmail, cfg.SeafileAdminPassword, cfg.SeafileAdminToken),
-		fns:   newFNSClient(cfg.FNSURL, cfg.FNSMintSecret),
+		fns:   newFNSClient(cfg.FNSURL, store),
 	}
 }
 
@@ -60,7 +61,6 @@ func main() {
 		ImmichURL:            os.Getenv("IMMICH_URL"),
 		ImmichKey:            os.Getenv("IMMICH_KEY"),
 		FNSURL:               os.Getenv("FNS_URL"),
-		FNSMintSecret:        os.Getenv("FNS_MINT_SECRET"),
 	}
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT_SECRET is required: set it to Open WebUI's FORWARD_USER_INFO_HEADER_JWT_SECRET")

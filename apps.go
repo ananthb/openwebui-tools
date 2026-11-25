@@ -23,7 +23,7 @@ var httpClient = &http.Client{Timeout: 120 * time.Second}
 type Empty struct{}
 
 type tokenIn struct {
-	App   string `json:"app" jsonschema:"app name: mealie or immich"`
+	App   string `json:"app" jsonschema:"app name: mealie, immich, or obsidian (alias: fns)"`
 	Token string `json:"token" jsonschema:"your API token; empty to forget"`
 }
 
@@ -179,7 +179,10 @@ func (s *server) appToken(user *User, app, shared string) string {
 }
 
 func (s *server) registerAuthTools(srv *mcp.Server) {
-	mcp.AddTool(srv, &mcp.Tool{Name: "set_token", Description: "Store your personal token for an app (mealie or immich). Call with an empty token to forget it."}, s.setToken)
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "set_token",
+		Description: "Store your personal token for an app (mealie, immich, or obsidian; fns is accepted as an alias for obsidian). For obsidian, mint a REST token in https://obsidian.calculon.tech WebGUI with scope p:rest c:* f:* or c:openwebui-tools. Call with an empty token to forget it.",
+	}, s.setToken)
 	mcp.AddTool(srv, &mcp.Tool{Name: "token_status", Description: "Show the logged-in user and which apps have tokens or auto-auth configured."}, s.tokenStatus)
 }
 
@@ -188,13 +191,18 @@ func (s *server) setToken(ctx context.Context, _ *mcp.CallToolRequest, in tokenI
 	if u == nil {
 		return nil, nil, fmt.Errorf("unauthenticated")
 	}
-	if in.App != "mealie" && in.App != "immich" {
-		return fail(fmt.Errorf("app must be mealie or immich"))
+	app := strings.ToLower(strings.TrimSpace(in.App))
+	if app == "fns" {
+		app = "obsidian"
 	}
-	if err := s.store.set(u.ID, in.App, strings.TrimSpace(in.Token)); err != nil {
+	if app != "mealie" && app != "immich" && app != "obsidian" {
+		return fail(fmt.Errorf("app must be mealie, immich, or obsidian"))
+	}
+	tok := strings.TrimSpace(in.Token)
+	if err := s.store.set(u.ID, app, tok); err != nil {
 		return fail(err)
 	}
-	if in.Token == "" {
+	if tok == "" {
 		return text("forgotten")
 	}
 	return text("stored")
@@ -207,9 +215,9 @@ func (s *server) tokenStatus(ctx context.Context, _ *mcp.CallToolRequest, _ Empt
 	}
 	_, hasMealie := s.store.get(u.ID, "mealie")
 	_, hasImmich := s.store.get(u.ID, "immich")
+	_, hasObsidian := s.store.get(u.ID, "obsidian")
 
 	seafileAuto := s.sf.baseURL != "" && (s.sf.cfgAdminToken != "" || (s.sf.adminEmail != "" && s.sf.adminPassword != ""))
-	fnsAuto := s.fns.baseURL != "" && s.fns.mintSecret != ""
 
 	return text(map[string]any{
 		"user": map[string]string{
@@ -222,9 +230,9 @@ func (s *server) tokenStatus(ctx context.Context, _ *mcp.CallToolRequest, _ Empt
 				"configured": seafileAuto,
 				"auth":       "auto",
 			},
-			"fns": map[string]any{
-				"configured": fnsAuto,
-				"auth":       "auto",
+			"obsidian": map[string]any{
+				"configured":     s.fns.baseURL != "",
+				"personal_token": hasObsidian,
 			},
 			"mealie": map[string]any{
 				"configured":      s.cfg.MealieURL != "",
