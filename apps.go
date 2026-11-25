@@ -8,20 +8,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var httpClient = &http.Client{Timeout: 120 * time.Second}
 
+// Empty is the input for tools that take no arguments.
+type Empty struct{}
+
+type tokenIn struct {
+	App   string `json:"app" jsonschema:"app name: mealie or immich"`
+	Token string `json:"token" jsonschema:"your API token; empty to forget"`
+}
+
 // do issues a request, backing off on 429 (Seafile throttles per user).
 func do(ctx context.Context, method, rawurl string, headers map[string]string, body []byte) (int, []byte, error) {
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, rawurl, bytes.NewReader(body))
+		var r io.Reader
+		if body != nil {
+			r = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, rawurl, r)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -57,12 +70,52 @@ func getJSON(ctx context.Context, rawurl string, headers map[string]string) (any
 	return out, nil
 }
 
+func doJSON(ctx context.Context, method, rawurl string, headers map[string]string, payload any) (int, []byte, error) {
+	var body []byte
+	h := headers
+	if payload != nil {
+		var err error
+		body, err = json.Marshal(payload)
+		if err != nil {
+			return 0, nil, err
+		}
+		h = withJSON(headers)
+	}
+	return do(ctx, method, rawurl, h, body)
+}
+
 func snippet(b []byte) string {
 	s := strings.TrimSpace(string(b))
 	if len(s) > 300 {
 		return s[:300]
 	}
 	return s
+}
+
+func withJSON(h map[string]string) map[string]string {
+	out := map[string]string{"Content-Type": "application/json"}
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
+}
+
+func text(v any) (*mcp.CallToolResult, any, error) {
+	var s string
+	if str, ok := v.(string); ok {
+		s = str
+	} else {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		s = string(b)
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}}, nil, nil
+}
+
+func fail(err error) (*mcp.CallToolResult, any, error) {
+	return text(fmt.Sprintf("error: %v", err))
 }
 
 // --- per-user token store (file-backed; shared tokens come from config) ------
@@ -117,104 +170,72 @@ func (s *tokenStore) save() error {
 	return os.Rename(tmp, s.path)
 }
 
-// --- Seafile -----------------------------------------------------------------
-
-type seafile struct {
-	adminMu    sync.Mutex
-	adminToken string
-	userMu     sync.Mutex
-	userTokens map[string]string // email -> token
+// appToken returns the caller's token for an app, falling back to the shared one.
+func (s *server) appToken(user *User, app, shared string) string {
+	if t, ok := s.store.get(user.ID, app); ok {
+		return t
+	}
+	return shared
 }
 
-func (s *server) seafileAdmin(ctx context.Context) (string, error) {
-	s.sf.adminMu.Lock()
-	defer s.sf.adminMu.Unlock()
-	if s.sf.adminToken != "" {
-		return s.sf.adminToken, nil
-	}
-	if s.cfg.SeafileAdminToken != "" {
-		s.sf.adminToken = s.cfg.SeafileAdminToken
-		return s.sf.adminToken, nil
-	}
-	form := url.Values{"username": {s.cfg.SeafileAdminEmail}, "password": {s.cfg.SeafileAdminPassword}}
-	code, b, err := do(ctx, http.MethodPost, s.cfg.SeafileBase+"/api2/auth-token/",
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, []byte(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	if code >= 400 {
-		return "", fmt.Errorf("seafile admin login http %d: %s", code, snippet(b))
-	}
-	var out struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil || out.Token == "" {
-		return "", fmt.Errorf("seafile admin login: bad response %s", snippet(b))
-	}
-	s.sf.adminToken = out.Token
-	return out.Token, nil
+func (s *server) registerAuthTools(srv *mcp.Server) {
+	mcp.AddTool(srv, &mcp.Tool{Name: "set_token", Description: "Store your personal token for an app (mealie or immich). Call with an empty token to forget it."}, s.setToken)
+	mcp.AddTool(srv, &mcp.Tool{Name: "token_status", Description: "Show the logged-in user and which apps have tokens or auto-auth configured."}, s.tokenStatus)
 }
 
-func (s *server) seafileUser(ctx context.Context, email string) (string, error) {
-	s.sf.userMu.Lock()
-	if t, ok := s.sf.userTokens[email]; ok {
-		s.sf.userMu.Unlock()
-		return t, nil
+func (s *server) setToken(ctx context.Context, _ *mcp.CallToolRequest, in tokenIn) (*mcp.CallToolResult, any, error) {
+	u := userFrom(ctx)
+	if u == nil {
+		return nil, nil, fmt.Errorf("unauthenticated")
 	}
-	s.sf.userMu.Unlock()
-	admin, err := s.seafileAdmin(ctx)
-	if err != nil {
-		return "", err
+	if in.App != "mealie" && in.App != "immich" {
+		return fail(fmt.Errorf("app must be mealie or immich"))
 	}
-	form := url.Values{"email": {email}}
-	code, b, err := do(ctx, http.MethodPost, s.cfg.SeafileBase+"/api/v2.1/admin/generate-user-auth-token/",
-		map[string]string{"Authorization": "Token " + admin, "Content-Type": "application/x-www-form-urlencoded"}, []byte(form.Encode()))
-	if err != nil {
-		return "", err
+	if err := s.store.set(u.ID, in.App, strings.TrimSpace(in.Token)); err != nil {
+		return fail(err)
 	}
-	if code >= 400 {
-		return "", fmt.Errorf("seafile mint http %d: %s", code, snippet(b))
+	if in.Token == "" {
+		return text("forgotten")
 	}
-	var out struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil || out.Token == "" {
-		return "", fmt.Errorf("seafile mint: bad response %s", snippet(b))
-	}
-	s.sf.userMu.Lock()
-	s.sf.userTokens[email] = out.Token
-	s.sf.userMu.Unlock()
-	return out.Token, nil
+	return text("stored")
 }
 
-func (s *server) seafileRepos(ctx context.Context, token string) ([]map[string]any, error) {
-	v, err := getJSON(ctx, s.cfg.SeafileBase+"/api/v2.1/repos/?per_page=100", map[string]string{"Authorization": "Token " + token})
-	if err != nil {
-		return nil, err
+func (s *server) tokenStatus(ctx context.Context, _ *mcp.CallToolRequest, _ Empty) (*mcp.CallToolResult, any, error) {
+	u := userFrom(ctx)
+	if u == nil {
+		return nil, nil, fmt.Errorf("unauthenticated")
 	}
-	repos, _ := v.(map[string]any)["repos"].([]any)
-	out := make([]map[string]any, 0, len(repos))
-	for _, r := range repos {
-		if m, ok := r.(map[string]any); ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
-}
+	_, hasMealie := s.store.get(u.ID, "mealie")
+	_, hasImmich := s.store.get(u.ID, "immich")
 
-func (s *server) seafileResolve(ctx context.Context, token, path string) (string, string, error) {
-	parts := strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
-	if len(parts) == 0 {
-		return "", "", fmt.Errorf("empty path")
-	}
-	repos, err := s.seafileRepos(ctx, token)
-	if err != nil {
-		return "", "", err
-	}
-	for _, r := range repos {
-		if r["repo_name"] == parts[0] {
-			return r["repo_id"].(string), "/" + strings.Join(parts[1:], "/"), nil
-		}
-	}
-	return "", "", fmt.Errorf("no library named %q", parts[0])
+	seafileAuto := s.sf.baseURL != "" && (s.sf.cfgAdminToken != "" || (s.sf.adminEmail != "" && s.sf.adminPassword != ""))
+	fnsAuto := s.fns.baseURL != "" && s.fns.mintSecret != ""
+
+	return text(map[string]any{
+		"user": map[string]string{
+			"id":    u.ID,
+			"email": u.Email,
+			"name":  u.Name,
+		},
+		"apps": map[string]any{
+			"seafile": map[string]any{
+				"configured": seafileAuto,
+				"auth":       "auto",
+			},
+			"fns": map[string]any{
+				"configured": fnsAuto,
+				"auth":       "auto",
+			},
+			"mealie": map[string]any{
+				"configured":      s.cfg.MealieURL != "",
+				"personal_token":  hasMealie,
+				"shared_fallback": s.cfg.MealieToken != "",
+			},
+			"immich": map[string]any{
+				"configured":      s.cfg.ImmichURL != "",
+				"personal_token":  hasImmich,
+				"shared_fallback": s.cfg.ImmichKey != "",
+			},
+		},
+	})
 }

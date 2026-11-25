@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// openwebui-tools: an MCP server for Open WebUI. It exposes read tools for
-// Seafile, Mealie, Immich and Actual, acting as the caller named by Open WebUI's
-// forwarded user JWT (X-OpenWebUI-User-Jwt, HS256). Per-user tokens live in a
-// local store; a shared token per app is the fallback.
+// openwebui-tools: an MCP server for Open WebUI. It exposes read and write
+// tools for Seafile, Mealie, Immich, and Obsidian Fast Note Sync (FNS), acting
+// as the caller named by Open WebUI's forwarded user JWT (X-OpenWebUI-User-Jwt,
+// HS256). Per-user tokens live in a local store or are minted automatically;
+// a shared token per app is the fallback where supported.
 package main
 
 import (
@@ -14,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const version = "v0.2.0"
+const version = "v0.3.0"
 
 type config struct {
 	Addr                   string
@@ -26,13 +27,23 @@ type config struct {
 	SeafileAdminToken      string
 	MealieURL, MealieToken string
 	ImmichURL, ImmichKey   string
-	ActualURL              string
+	FNSURL, FNSMintSecret  string
 }
 
 type server struct {
 	cfg   config
 	store *tokenStore
-	sf    seafile
+	sf    *SeafileClient
+	fns   *FNSClient
+}
+
+func newServer(cfg config) *server {
+	return &server{
+		cfg:   cfg,
+		store: newTokenStore(cfg.StorePath),
+		sf:    newSeafileClient(cfg.SeafileBase, cfg.SeafileAdminEmail, cfg.SeafileAdminPassword, cfg.SeafileAdminToken),
+		fns:   newFNSClient(cfg.FNSURL, cfg.FNSMintSecret),
+	}
 }
 
 func main() {
@@ -48,13 +59,14 @@ func main() {
 		MealieToken:          os.Getenv("MEALIE_TOKEN"),
 		ImmichURL:            os.Getenv("IMMICH_URL"),
 		ImmichKey:            os.Getenv("IMMICH_KEY"),
-		ActualURL:            os.Getenv("ACTUAL_URL"),
+		FNSURL:               os.Getenv("FNS_URL"),
+		FNSMintSecret:        os.Getenv("FNS_MINT_SECRET"),
 	}
 	if cfg.JWTSecret == "" {
 		log.Fatal("JWT_SECRET is required: set it to Open WebUI's FORWARD_USER_INFO_HEADER_JWT_SECRET")
 	}
 
-	s := &server{cfg: cfg, store: newTokenStore(cfg.StorePath), sf: seafile{userTokens: map[string]string{}}}
+	s := newServer(cfg)
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "openwebui-tools", Version: version}, nil)
 	s.register(srv)
@@ -71,6 +83,14 @@ func main() {
 	if err := http.ListenAndServe(cfg.Addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func (s *server) register(srv *mcp.Server) {
+	s.registerAuthTools(srv)
+	s.registerSeafileTools(srv)
+	s.registerMealieTools(srv)
+	s.registerImmichTools(srv)
+	s.registerFNSTools(srv)
 }
 
 func env(k, d string) string {
