@@ -19,19 +19,22 @@ So it must only be reachable on a private network.
 
 ## Per-user tokens, with a shared fallback
 
-Seafile and Obsidian FNS mint a token per person automatically using the
-caller's `email` (and refresh it once on `401 Unauthorized`).
-Mealie and Immich need a credential the person supplies once; the server stores
-it keyed by their Open WebUI id:
+Seafile mints a token per person automatically using the caller's `email` (and
+refreshes it once on `401 Unauthorized`).
+Mealie, Immich, and Obsidian FNS need a credential the person supplies once;
+the server stores it keyed by their Open WebUI id:
 
 ```
-set_token(app="immich", token="...")     # or app="mealie"
+set_token(app="immich", token="...")     # or app="mealie", app="obsidian" (alias: "fns")
 ```
+
+For `obsidian`, mint a REST token in `https://obsidian.calculon.tech` WebGUI
+with scope `p:rest c:* f:*` or `c:openwebui-tools`.
 
 Every call uses the person's token if present, else the shared token from the
-server's environment. `set_token` with an empty token forgets it. Call
-`token_status` to inspect your logged-in identity and which apps have tokens or
-auto-auth configured.
+server's environment (where supported: `MEALIE_TOKEN`, `IMMICH_KEY`).
+`set_token` with an empty token forgets it. Call `token_status` to inspect your
+logged-in identity and which apps have tokens or auto-auth configured.
 
 ## Tools
 
@@ -52,15 +55,14 @@ docker run -d -p 8090:8090 \
   -e ADMIN_EMAIL=seafile-automation@example.com -e ADMIN_PASSWORD=... \
   -e MEALIE_URL=https://mealie.example.com -e MEALIE_TOKEN=... \
   -e IMMICH_URL=https://immich.example.com -e IMMICH_KEY=... \
-  -e FNS_URL=http://fns:9000 -e FNS_MINT_SECRET=... \
+  -e FNS_URL=http://fns:9000 \
   -v openwebui-tools-data:/data \
   ghcr.io/ananthb/openwebui-tools:latest
 ```
 
 Env (all optional except `JWT_SECRET`): `ADDR` (`:8090`), `STORE_PATH`
 (`/data/tokens.json`), `SEAHUB`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`/`ADMIN_TOKEN`,
-`MEALIE_URL`, `MEALIE_TOKEN`, `IMMICH_URL`, `IMMICH_KEY`, `FNS_URL`,
-`FNS_MINT_SECRET`.
+`MEALIE_URL`, `MEALIE_TOKEN`, `IMMICH_URL`, `IMMICH_KEY`, `FNS_URL`.
 
 The Seafile admin must be a local account with a password (Seafile's
 `User.objects.create_superuser`, not Django's `createsuperuser`).

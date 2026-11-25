@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -17,106 +16,51 @@ import (
 const fnsClientName = "openwebui-tools"
 
 type FNSClient struct {
-	baseURL    string
-	mintSecret string
-
-	mu         sync.Mutex
-	userTokens map[string]string // email -> token
+	baseURL string
+	store   *tokenStore
 }
 
-func newFNSClient(baseURL, mintSecret string) *FNSClient {
+func newFNSClient(baseURL string, store *tokenStore) *FNSClient {
 	return &FNSClient{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		mintSecret: mintSecret,
-		userTokens: map[string]string{},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		store:   store,
 	}
 }
 
-func (c *FNSClient) userToken(ctx context.Context, email string) (string, error) {
+func (c *FNSClient) userToken(userID string) (string, error) {
 	if c.baseURL == "" {
 		return "", fmt.Errorf("FNS_URL is not configured")
 	}
-	if c.mintSecret == "" {
-		return "", fmt.Errorf("FNS_MINT_SECRET is not configured")
+	if c.store == nil {
+		return "", fmt.Errorf("no Obsidian token: call set_token(app=\"obsidian\", token=...) once")
 	}
-
-	c.mu.Lock()
-	if t, ok := c.userTokens[email]; ok {
-		c.mu.Unlock()
-		return t, nil
+	tok, ok := c.store.get(userID, "obsidian")
+	if !ok {
+		return "", fmt.Errorf("no Obsidian token: call set_token(app=\"obsidian\", token=...) once (mint a REST token in https://obsidian.calculon.tech WebGUI with scope p:rest c:* f:* or c:openwebui-tools)")
 	}
-	c.mu.Unlock()
-
-	payload := map[string]any{
-		"email":       email,
-		"client":      fnsClientName,
-		"scope":       "p:rest c:" + fnsClientName + " f:*",
-		"expiredDays": 7,
-	}
-	code, b, err := doJSON(ctx, http.MethodPost, c.baseURL+"/api/internal/token",
-		map[string]string{"Authorization": "Bearer " + c.mintSecret}, payload)
-	if err != nil {
-		return "", err
-	}
-	if code >= 400 {
-		return "", fmt.Errorf("fns mint http %d: %s", code, snippet(b))
-	}
-
-	var out struct {
-		Token string `json:"token"`
-		Data  struct {
-			Token string `json:"token"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return "", fmt.Errorf("fns mint: bad response %s", snippet(b))
-	}
-	tok := out.Token
-	if tok == "" {
-		tok = out.Data.Token
-	}
-	if tok == "" {
-		return "", fmt.Errorf("fns mint: empty token in response %s", snippet(b))
-	}
-
-	c.mu.Lock()
-	c.userTokens[email] = tok
-	c.mu.Unlock()
 	return tok, nil
 }
 
-func (c *FNSClient) invalidateUserToken(email, token string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if cur, ok := c.userTokens[email]; ok && cur == token {
-		delete(c.userTokens, email)
+func (c *FNSClient) doUser(ctx context.Context, userID, method, apiPath string, payload any) ([]byte, error) {
+	tok, err := c.userToken(userID)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func (c *FNSClient) doUser(ctx context.Context, email, method, apiPath string, payload any) ([]byte, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		tok, err := c.userToken(ctx, email)
-		if err != nil {
-			return nil, err
-		}
-		headers := map[string]string{
-			"Authorization": "Bearer " + tok,
-			"X-Client":      fnsClientName,
-		}
-		code, b, err := doJSON(ctx, method, c.baseURL+apiPath, headers, payload)
-		if err != nil {
-			return nil, err
-		}
-		if code == http.StatusUnauthorized && attempt == 0 {
-			c.invalidateUserToken(email, tok)
-			continue
-		}
-		if code >= 400 {
-			return nil, fmt.Errorf("fns http %d: %s", code, snippet(b))
-		}
-		return b, nil
+	headers := map[string]string{
+		"Authorization": "Bearer " + tok,
+		"X-Client":      fnsClientName,
 	}
-	return nil, fmt.Errorf("fns request failed after token refresh")
+	code, b, err := doJSON(ctx, method, c.baseURL+apiPath, headers, payload)
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusUnauthorized {
+		return nil, fmt.Errorf("obsidian token rejected (401): it may be expired or revoked — mint a new REST token in https://obsidian.calculon.tech and call set_token(app=\"obsidian\", token=...): %s", snippet(b))
+	}
+	if code >= 400 {
+		return nil, fmt.Errorf("fns http %d: %s", code, snippet(b))
+	}
+	return b, nil
 }
 
 // --- Tool input structs ------------------------------------------------------
@@ -209,11 +153,11 @@ func (s *server) registerFNSTools(srv *mcp.Server) {
 }
 
 func (s *server) fnsCall(ctx context.Context, method, apiPath string, payload any) (*mcp.CallToolResult, any, error) {
-	email, err := requireEmail(ctx)
-	if err != nil {
-		return fail(err)
+	u := userFrom(ctx)
+	if u == nil {
+		return fail(fmt.Errorf("unauthenticated"))
 	}
-	b, err := s.fns.doUser(ctx, email, method, apiPath, payload)
+	b, err := s.fns.doUser(ctx, u.ID, method, apiPath, payload)
 	if err != nil {
 		return fail(err)
 	}
@@ -364,16 +308,16 @@ func (s *server) fnsNoteRestore(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 func (s *server) fnsNoteLinks(ctx context.Context, _ *mcp.CallToolRequest, in fnsNotePathIn) (*mcp.CallToolResult, any, error) {
-	email, err := requireEmail(ctx)
-	if err != nil {
-		return fail(err)
+	u := userFrom(ctx)
+	if u == nil {
+		return fail(fmt.Errorf("unauthenticated"))
 	}
 	q := url.Values{"vault": {in.Vault}, "path": {in.Path}}.Encode()
-	back, err := s.fns.doUser(ctx, email, http.MethodGet, "/api/note/backlinks?"+q, nil)
+	back, err := s.fns.doUser(ctx, u.ID, http.MethodGet, "/api/note/backlinks?"+q, nil)
 	if err != nil {
 		return fail(err)
 	}
-	out, err := s.fns.doUser(ctx, email, http.MethodGet, "/api/note/outlinks?"+q, nil)
+	out, err := s.fns.doUser(ctx, u.ID, http.MethodGet, "/api/note/outlinks?"+q, nil)
 	if err != nil {
 		return fail(err)
 	}
