@@ -15,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const version = "v0.3.0"
+const version = "v0.4.1"
 
 type config struct {
 	Addr                   string

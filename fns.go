@@ -36,7 +36,7 @@ func (c *FNSClient) userToken(userID string) (string, error) {
 	}
 	tok, ok := c.store.get(userID, "obsidian")
 	if !ok {
-		return "", fmt.Errorf("no Obsidian token: call set_token(app=\"obsidian\", token=...) once (mint a REST token in https://obsidian.calculon.tech WebGUI with scope p:rest c:* f:* or c:openwebui-tools)")
+		return "", fmt.Errorf("no Obsidian token: call set_token(app=\"obsidian\", token=...) once (mint a REST token in the Fast Note Sync WebGUI with scope p:rest c:* f:* or c:openwebui-tools)")
 	}
 	return tok, nil
 }
@@ -55,7 +55,7 @@ func (c *FNSClient) doUser(ctx context.Context, userID, method, apiPath string, 
 		return nil, err
 	}
 	if code == http.StatusUnauthorized {
-		return nil, fmt.Errorf("obsidian token rejected (401): it may be expired or revoked — mint a new REST token in https://obsidian.calculon.tech and call set_token(app=\"obsidian\", token=...): %s", snippet(b))
+		return nil, fmt.Errorf("obsidian token rejected (401): it may be expired or revoked — mint a new REST token in the Fast Note Sync WebGUI and call set_token(app=\"obsidian\", token=...): %s", snippet(b))
 	}
 	if code >= 400 {
 		return nil, fmt.Errorf("fns http %d: %s", code, snippet(b))

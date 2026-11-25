@@ -28,7 +28,7 @@ the server stores it keyed by their Open WebUI id:
 set_token(app="immich", token="...")     # or app="mealie", app="obsidian" (alias: "fns")
 ```
 
-For `obsidian`, mint a REST token in `https://obsidian.calculon.tech` WebGUI
+For `obsidian`, mint a REST token in the Fast Note Sync WebGUI
 with scope `p:rest c:* f:*` or `c:openwebui-tools`.
 
 Every call uses the person's token if present, else the shared token from the
